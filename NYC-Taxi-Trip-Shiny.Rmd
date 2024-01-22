@@ -1,0 +1,477 @@
+---
+title: "NYC Taxi Trips - Janurary 2023"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+  runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(shiny)
+library(arrow)
+library(tidyverse)
+library(sf)
+library(plotly)
+library(naniar)
+library(broom)
+library(knitr)
+library(rsconnect)
+
+# stops using scientific notation
+options(scipen=999)
+
+# provides full stacktrace
+options(shiny.fullstacktrace=TRUE)
+
+taxi_raw <- read_parquet('data/yellow_tripdata_2023-01.parquet')
+taxi_zones <- read.csv('data/taxi_zone_lookup.csv')
+taxi_data_dict <- read.csv('data/taxi_data_dict.csv')
+taxi_zones_map <- st_read('data/taxi_zones/taxi_zones.shp')
+```
+
+```{r data cleaning, include=FALSE}
+# Excludes missing values, incomplete observations, and outliers
+miss_var_summary(taxi_raw)
+taxi_clean <- taxi_raw %>%
+  drop_na() %>%
+  filter(fare_amount > 0, trip_distance > 0, trip_distance < 600)
+
+# Join taxi_clean with taxi_zones to get pickup and drop off location names
+taxi_clean <- taxi_clean %>%
+  left_join(taxi_zones[, c('LocationID', 'Zone')], by = c('PULocationID' = 'LocationID'))
+colnames(taxi_clean)[which(names(taxi_clean) == 'Zone')] <- 'PUZone'
+
+taxi_clean <- taxi_clean %>%
+  left_join(taxi_zones[, c('LocationID', 'Zone')], by = c('DOLocationID' = 'LocationID'))
+colnames(taxi_clean)[which(names(taxi_clean) == 'Zone')] <- 'DOZone'
+
+# filtering taxi_clean for trips that end at the airport
+taxi_clean_airport <- taxi_clean %>%
+  filter(DOZone %in% c('Newark Airport', 'JFK Airport', 'LaGuardia Airport'))
+
+# calculate trip time and time to distance ratio
+taxi_clean_airport <- taxi_clean_airport %>%
+  mutate(total_trip_time = difftime(tpep_dropoff_datetime, tpep_pickup_datetime , units = "mins")) %>%
+  mutate(time_distance_ratio = as.numeric(total_trip_time) / trip_distance)
+```
+
+
+```{r summaries and models, include=FALSE}
+# summarise average distance, fare, and trip time for all trips to the airport
+distance_summary <- taxi_clean_airport %>%
+  group_by(PUZone, DOZone) %>%
+  summarise(
+    average_distance = median(trip_distance),
+    average_fare = median(fare_amount),
+    average_trip_time = median(total_trip_time),
+    total_trips = n()
+  )
+
+# find most popular airport
+airport_summary <- table(taxi_clean_airport['DOZone'])
+
+# use median as there are some outliers
+time_summary <- taxi_clean_airport %>%
+  filter(DOZone == "LaGuardia Airport") %>%
+  group_by(time = floor_date(tpep_pickup_datetime, '1 hour')) %>%
+  summarise(
+    average_distance = median(trip_distance),
+    average_trip_time = median(total_trip_time),
+    time_distance_ratio = median(time_distance_ratio),
+    hour = hour(time)
+  )
+
+# reframe time summary to average time/distance ratio over the month
+time_summary_2 <- time_summary %>%
+  group_by(hour) %>%
+  reframe(
+    average_distance = median(average_distance),
+    average_trip_time = median(average_trip_time),
+    time_distance_ratio = median(time_distance_ratio)
+  ) %>%
+  mutate(time = paste(hour, ":00:00", sep = ""))
+
+# linear regression model for average fare and distance
+taxi_fit <-
+  lm(average_fare ~ average_distance, data = distance_summary)
+tidy(taxi_fit)
+
+taxi_model <- augment(taxi_fit, distance_summary)
+```
+
+# Project Outline
+
+## Column {data-width="500"}
+-----------------------------------------------------------------------
+
+### Project Outline
+
+While Taxis are an incredibly important and useful mode of transport used by many, there is a lot of uncertainty regarding how much your trip will cost, when the best time to call is, and whether you will get to your destination on time. The total distance of your trip is strongly associated with the total fare, and the time the trip will take, however external factors such as traffic, road closures, and weather can all play a significant role in the strength of this association.
+
+These datasets have been obtained from the NYC Taxi and Limousine Commission. Taxi trip data has been provided as a single PARQUET file ('yellow_tripdata_2023-01.parquet', see data dictionary for details), a taxi zone lookup table has been provided as a CSV file ('taxi_zone_lookup.csv'), and a shape file has been provided for mapping purposes ('taxi_zones.shp'). 
+
+The main limitation of this analysis is the brevity of the time period explored (Jan 2023), while approximately 3,000,000 yellow taxi trips were taken during this time, it is unclear whether this data can be used to make accurate predictions about taxi trips throughout the year. Further, there are some zones/airport combinations in which no taxi trips were taken in this period, resulting in an inability to make meaningful predicitons about taxi trips with these combinations of pickup zone and dropoff airport. 
+
+References:
+
+TLC Trip Record Data - TLC. (n.d.). Www.nyc.gov. https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page
+
+Aden-Buie G, Sievert C, Iannone R, Allaire J, Borges B (2023). _flexdashboard: R Markdown Format for Flexible Dashboards_. R package version 0.6.2, <https://CRAN.R-project.org/package=flexdashboard>.
+
+Chang W, Cheng J, Allaire J, Sievert C, Schloerke B, Xie Y, Allen J, McPherson J, Dipert A, Borges B (2023). _shiny: Web Application Framework for R_. R package version 1.8.0, <https://CRAN.R-project.org/package=shiny>.
+
+Richardson N, Cook I, Crane N, Dunnington D, François R, Keane J, Moldovan-Grünfeld D, Ooms J, Wujciak-Jens J, Apache Arrow (2023). _arrow: Integration to 'Apache' 'Arrow'_. R package version 14.0.0, <https://CRAN.R-project.org/package=arrow>.
+
+Wickham H, Averick M, Bryan J, Chang W, McGowan LD, Françoi R, Grolemun G, Haye A, Henr L, Heste J, Kuh M, Pederse TL, Mille E, Bach SM, Müll K, Oo ,J, Robins ,D, Seid ,DP, Spi ,V, Takahas ,K, Vaugh ,D, Wil ,C, W ,K, Yutani ,H (2019). “Welcome to the tidyverse.” _Journal of Open Source Software_, *4*(43), 1686. doi:10.21105/joss.01686 <https://doi.org/10.21105/joss.01686>.
+
+Pebesma, E., & Bivand, R. (2023). Spatial Data Science: With Applications in R. Chapman and Hall/CRC. <https://doi.org/10.1201/9780429459016>.
+
+C. Sievert. Interactive Web-Based Data Visualization with R, plotly, and shiny. Chapman and Hall/CRC Florida, 2020.
+
+Tierney N, Cook D (2023). “Expanding Tidy Data Principles to Facilitate Missing Data Exploration, Visualization and Assessment of Imputations.” _Journal of Statistical Software_, *105*(7), 1-31. doi:10.18637/jss.v105.i07 <https://doi.org/10.18637/jss.v105.i07>.
+
+Robinson D, Hayes A, Couch S (2023). _broom: Convert Statistical Objects into Tidy Tibbles_. R package version 1.0.5, <https://CRAN.R-project.org/package=broom>.
+
+Xie Y (2023). _knitr: A General-Purpose Package for Dynamic Report Generation in R_. R package version 1.44, <https://yihui.org/knitr/>.
+
+
+## Column {data-width="500"}
+-----------------------------------------------------------------------
+
+### Data Dictionary
+
+```{r}
+kable(taxi_data_dict, col.names = c("Field Name", "Description"))
+```
+
+
+# Methodology
+
+## Column {data-width="150"}
+
+### Total Trips
+
+```{r}
+valueBox(
+  value = format(nrow(taxi_clean), big.mark = ","),
+  caption = "Taxi Trips",
+  icon = "fa-taxi"
+)
+```
+
+### Trips to Airport
+
+```{r}
+valueBox(
+  value = format(nrow(taxi_clean_airport), big.mark = ","),
+  caption = "Total Trips to the Airport",
+  icon = "fa-plane"
+)
+```
+
+### Miles travelled
+
+```{r}
+valueBox(
+  value = format(sum(taxi_clean_airport$trip_distance), big.mark = ","),
+  caption = "Miles Travelled to the Airport",
+  icon = "fa-road"
+)
+```
+
+### Total fare
+
+```{r}
+valueBox(
+  value = format(sum(taxi_clean_airport$total_amount), big.mark = ","),
+  caption = "Total Fares to the Airport ($)",
+  icon = "fa-dollar-sign"
+)
+```
+
+
+## Column {data-width="450"}
+
+### Problem Questions {data-height="125"}
+
+In this analysis I will be investigating the NYC Taxi and Limousine Commission Trip Record Data for Janurary of 2023 (TLC Trip Record Data - TLC, n.d.) to explore the impacts of distance, pick-up zone, and time of day on total taxi fares and travel time. This analysis will be guided by the following questions:
+
+1. Which pick-up zones are most commonly used for each airport?
+2. How strongly does pick-up zone (distance from destination) correlate with total fare amount?
+3. How does the time of day/day of week affect the total trip time with respect to total distance?
+4. Can the trip distance be used to predict the total fare?
+
+### Data Cleaning/Wrangling
+
+Considering the small percentage of missing values (2.34% for 5/19 variables) these observations were excluded from the analysis. In addition to this, observations with invalid fare amounts and trip distances below 0 or over 600 were classified as erroneous entries and extreme outliers, therefore were excluded from analysis. 
+
+```{r eval=FALSE, echo=TRUE}
+taxi_clean <- taxi_raw %>%
+  drop_na() %>%
+  filter(fare_amount > 0, trip_distance > 0, trip_distance < 600)
+```
+
+To determine the location names for the pick-up and drop-off zones, a left join was performed with the taxi zones lookup table using the pick-up and drop-off location zone IDs respectively. 
+
+```{r eval=FALSE, echo=TRUE}
+taxi_clean <- taxi_clean %>%
+  left_join(taxi_zones[, c('LocationID', 'Zone')], by = c('PULocationID' = 'LocationID'))
+colnames(taxi_clean)[which(names(taxi_clean) == 'Zone')] <- 'PUZone'
+
+taxi_clean <- taxi_clean %>%
+  left_join(taxi_zones[, c('LocationID', 'Zone')], by = c('DOLocationID' = 'LocationID'))
+colnames(taxi_clean)[which(names(taxi_clean) == 'Zone')] <- 'DOZone'
+```
+
+The 'taxi_clean' dataframe was then filtered for observations in which the drop-ff zone was either 'LaGuardia Airport', 'JFK Airport', or 'Newark Airport'.
+
+Finally, mutations were performed to determine the total trip time and the time/distance ratio. This ratio will be used as a measure of traffic congestion.
+
+```{r eval=FALSE, echo=TRUE}
+taxi_clean_airport <- taxi_clean_airport %>%
+  mutate(total_trip_time = difftime(tpep_dropoff_datetime, tpep_pickup_datetime , units = "mins")) %>%
+  mutate(time_distance_ratio = as.numeric(total_trip_time) / trip_distance)
+```
+
+
+## Column {data-width="400"}
+
+### Analysis
+
+To analyse this dataset, a number of summaries and models were created to reframe the data to answer the problem questions:
+
+### Distance summary:
+
+The data was grouped by pick-up and drop-off zones and the average distance, average fare, average trip time, and number of total trips was calculated for each pair of pick-up and drop-off zones. This allowed for each trip type to be analysed individually. These summaries are representative of the median values; this method was chosen over the mean due to some outliers still being present in the data. 
+
+### Time summary:
+
+The data was filtered for LaGuardia drop-offs (busiest airport), and was grouped by hour and the average distance, average trip time, and time/distance ratio (average trip time / average distance) was calculated by hour for each day of Janurary of 2023. This allows us to examine the changes in traffic congestion throughout the day across the month. 
+
+### Time summary 2:
+
+This summary reframes the original time summary, first the data is grouped by hour, and the average distance, average trip time, and average time/distance ratio is calculated for the entire month. This summary provides a snapshot of general trends of how the time/distance ratio varies throughout the day. 
+
+### Fare vs distance model:
+
+In addition to this, a linear regression model has been created based on the relationship between the average fare and average distance (using data from the distance summary). This model will allow us to predict the expected fare based on the distance of the trip.
+
+# Taxi Zones - Fare/Distance
+
+## Inputs {.sidebar}
+
+Visualisation of the relationship between total trips, average fare, and average distance to the three NYC airports (LaGuardia, JFK, and Newark). Please note that not all pickup zones have trips to the airport in Janurary of 2023. These zones have been assigned 0 values for average fare and average distance variables.
+
+```{r map selection inputs}
+selectInput(
+  "airport",
+  label = "Choose a destination airport:",
+  choices = c('LaGuardia Airport', 'JFK Airport', 'Newark Airport'),
+  selected = 'LaGuardia Airport'
+)
+
+selectInput(
+  "variable_choice",
+  label = "Choose a variable:",
+  choices = c('total_trips', 'average_fare', 'average_distance'),
+  selected = 'total_trips'
+)
+```
+
+## Column {data-width="500"}
+
+```{r}
+selected_map <- reactive({
+  req(input$airport)
+  taxi_zones_map %>%
+    left_join(filter(distance_summary, DOZone == input$airport),
+              by = c("zone" = "PUZone")) %>%
+    mutate_at(c('average_distance', 'average_fare', 'total_trips'),
+              ~ replace_na(., 0))
+})
+```
+
+
+```{r}
+renderPlotly({
+  req(input$airport)
+  req(input$variable_choice)
+  p1 <- ggplot(data = selected_map(), aes(text = paste(zone))) +
+    geom_sf(color = "black", aes_string(fill = input$variable_choice)) +
+    ggtitle("Taxi Zones") +
+    labs(fill = input$variable_choice) +
+    xlab("Longitute") +
+    ylab("Latitude") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    scale_fill_distiller(palette = "Reds", direction = 1)
+  
+  ggplotly(
+    p1,
+    width = 800,
+    height = 700,
+    tooltip = c("text", "fill")
+  )
+})
+```
+
+## Column {data-width="200"}
+
+### JFK Airport Trips 
+
+```{r}
+valueBox(value = airport_summary[1],
+         caption = "Trips to JFK",
+         icon = "fa-plane")
+```
+
+### LaGuardia Airport Trips
+
+```{r}
+valueBox(value = airport_summary[2],
+         caption = "Trips to LaGuardia",
+         icon = "fa-plane")
+```
+
+### Newark Airport Trips
+
+```{r}
+valueBox(value = airport_summary[3],
+         caption = "Trips to Newark",
+         icon = "fa-plane")
+```
+
+# Time vs Distance
+
+## Inputs {.sidebar}
+-------------------------------------
+
+Visualisation of the relationship between the time/distance ratio (a measure of traffic congestion) and the time of day that allows the user to explore the changes in traffic congestion in Janurary of 2023. This visualisation is supported by a table showing the hourly average time/distance ratio.
+
+```{r time vs distance inputs}
+sliderInput(
+  "DateSlider",
+  "Please select a date:",
+  min = as.Date("2023-01-01", "%Y-%m-%d"),
+  max = as.Date("2023-01-31", "%Y-%m-%d"),
+  value = as.Date("2023-01-01"),
+  timeFormat = "%Y-%m-%d"
+)
+```
+
+## Column {data-width="500"}
+-----------------------------------------------------------------------
+
+```{r}
+selected_date <- reactive({
+  req(input$DateSlider)
+  time_summary %>%
+    filter(time_distance_ratio <= 5, as_date(time) == input$DateSlider)
+})
+```
+
+
+```{r time vs distance plot}
+renderPlot({
+  ggplot(data = selected_date()) +
+    geom_ribbon(
+      aes(
+        x = time,
+        ymin = 0,
+        ymax = time_distance_ratio,
+        colour = "red",
+        fill = "red",
+        alpha = 0.7
+      )
+    ) +
+    ggtitle("Time/Distance Ratio of Taxi Trips to LaGuardia Airport") +
+    xlab("Time of Day") +
+    ylab("Time/Distance Ratio (mins/mile)") +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      legend.position = "none",
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "black")
+    )
+})
+```
+
+## Column {data-width="200"}
+-----------------------------------------------------------------------
+
+### Average Time/Distance Ratio by Hour
+
+```{r}
+kable(
+  time_summary_2[, c('time',
+                     'average_distance',
+                     'average_trip_time',
+                     'time_distance_ratio')],
+  col.names = c(
+    'Time',
+    'Average Distance',
+    'Average Trip Time',
+    'Time/Distance Ratio'
+  )
+)
+```
+
+
+# Distance vs Fare Model
+
+## Inputs {.sidebar}
+-------------------------------------
+
+Using the average fare vs average distance linear regression model, you can predict your fare based on the total trip distance. A visualisation of this model can be seen in the 'Average Fare vs Average Distance  - Linear Regression' plot, and the predicted fare can be viewed in the value box to the right of the plot.
+
+```{r}
+sliderInput(
+  "DistanceSlider",
+  "Please select a distance (miles):",
+  min = 0,
+  max = 100,
+  value = 0
+)
+```
+
+## Column {data-width=500}
+
+```{r}
+renderPlot({
+  taxi_model %>%
+    ggplot(aes(x = average_distance, y = average_fare)) +
+    geom_point() +
+    geom_line(aes(y = .fitted), colour = "red") +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "black")
+    ) +
+    ggtitle("Average Fare vs Average Distance  - Linear Regression") +
+    xlab("Average Distance (miles)") +
+    ylab("Average Fare ($)")
+})
+```
+
+## Column {data-width=300}
+
+### Predicted Fare
+
+```{r}
+renderValueBox({
+  req(input$DistanceSlider)
+  valueBox(
+    value = format(round(predict(
+      taxi_fit,
+      data.frame(average_distance = input$DistanceSlider)
+    ), 2), nsmall = 2),
+    caption = "Predicted fare ($)",
+    icon = "fa-dollar-sign"
+  )
+})
+```
