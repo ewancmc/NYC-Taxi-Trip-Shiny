@@ -13,8 +13,3 @@ The main limitation of this analysis is the brevity of the time period explored 
    git clone https://github.com/ewancmc/NYC-Taxi-Trip-Shiny
    ```
 2. Run document (this will output a flexdashboard using the shiny runtime)
-
-## Viewing analysis online
-
-Full dashboard can be viewed [here](https://ewan-cmc.shinyapps.io/eto5510_assessment_2-1/)
-
